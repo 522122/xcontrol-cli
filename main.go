@@ -1,0 +1,171 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"strconv"
+)
+
+const (
+	cpuControl     = "/sys/devices/system/cpu"
+	splControl     = "/sys/devices/platform/asus-nb-wmi/ppt_pl1_spl"
+	fpptControl    = "/sys/devices/platform/asus-nb-wmi/ppt_fppt"
+	spptControl    = "/sys/devices/platform/asus-nb-wmi/ppt_pl2_sppt"
+	profileControl = "/sys/firmware/acpi/platform_profile"
+	chargeControl  = "/sys/class/power_supply/BAT0/charge_control_end_threshold"
+	smtControl     = "/sys/devices/system/cpu/smt/control"
+	boostControl   = "/sys/devices/system/cpu/cpufreq/boost"
+	physCores      = 8
+	unsetFlagValue = -1
+)
+
+func setSysValue(control, value string) error {
+	file, err := os.OpenFile(control, os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if _, err = file.WriteString(value); err != nil {
+		return err
+	}
+
+	fmt.Println(value, ">", control)
+	return nil
+}
+
+func simpleValueTransform(n int) string {
+	return strconv.Itoa(n)
+}
+
+func smtValueTransform(n int) string {
+	if n == 1 {
+		return "on"
+	} else {
+		return "off"
+	}
+}
+
+func tdpValueTransform(n int) string {
+	switch {
+	case n < 17:
+		return "quiet"
+	case n < 25:
+		return "balanced"
+	default:
+		return "performance"
+	}
+}
+
+func cpuValueTransform(n int) func(int) string {
+	return func(i int) string {
+		if i < n*2-2 {
+			return "1"
+		} else {
+			return "0"
+		}
+	}
+}
+
+func simpleSetFunc(control string, valueTransform func(int) string) func(int) error {
+	return func(n int) error {
+		return setSysValue(control, valueTransform(n))
+	}
+}
+
+func setCpuCount(n int) error {
+	var tasks []func(int) error
+	var errList []error
+
+	for i := 1; i < physCores; i++ {
+		control1 := fmt.Sprintf("%s/cpu%d/online", cpuControl, i)
+		control2 := fmt.Sprintf("%s/cpu%d/online", cpuControl, i+physCores)
+		tasks = append(tasks,
+			simpleSetFunc(control1, cpuValueTransform(n)),
+			simpleSetFunc(control2, cpuValueTransform(n)),
+		)
+	}
+
+	// when smt is disabled some files are locked
+	// order is 1,9,2,10,3,11 ...
+	for i, task := range tasks {
+		if err := task(i); err != nil {
+			errList = append(errList, fmt.Errorf("Core %d: %v", i, err))
+		}
+	}
+
+	if len(errList) > 0 {
+		return fmt.Errorf("Failed to set some CPU cores: %v", errList)
+	}
+	return nil
+}
+
+func setTdp(n int) error {
+
+	tasks := [4]func(int) error{
+		simpleSetFunc(profileControl, tdpValueTransform),
+		simpleSetFunc(splControl, simpleValueTransform),
+		simpleSetFunc(fpptControl, simpleValueTransform),
+		simpleSetFunc(spptControl, simpleValueTransform),
+	}
+
+	for _, task := range tasks {
+		if err := task(n); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateNumber(n int, min int, max int) error {
+	if n < min || n > max {
+		return fmt.Errorf("%d is out of range (%d - %d)", n, min, max)
+	}
+	return nil
+}
+
+func inRange(min int, max int) func(int) error {
+	return func(n int) error {
+		return validateNumber(n, min, max)
+	}
+}
+
+func validateAndApply(n int, validate func(int) error, flagName string, setFunc func(int) error) {
+	if n == unsetFlagValue {
+		return
+	}
+
+	if err := validate(n); err != nil {
+		fmt.Printf("Input error: %s %s\n", flagName, err)
+		return
+	}
+
+	if err := setFunc(n); err != nil {
+		fmt.Printf("Error setting %s to value %d: %s\n", flagName, n, err)
+	}
+}
+
+func main() {
+	var (
+		boost  = flag.Int("boost", unsetFlagValue, "Control CPU boost (0 | 1)")
+		charge = flag.Int("charge", unsetFlagValue, "Control max battery charge limit (50 - 100)")
+		cores  = flag.Int("cores", unsetFlagValue, "Control online CPU cores (1 - 8)")
+		smt    = flag.Int("smt", unsetFlagValue, "Control Simultaneous Multi-Threading (0 | 1)")
+		tdp    = flag.Int("tdp", unsetFlagValue, "Control TDP limit (8 - 25)")
+	)
+
+	flag.Parse()
+
+	if flag.NFlag() == 0 {
+		fmt.Println("Usage:")
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
+	validateAndApply(*cores, inRange(1, physCores), "-cores", setCpuCount)
+	validateAndApply(*tdp, inRange(8, 25), "-tdp", setTdp)
+	validateAndApply(*charge, inRange(50, 100), "-charge", simpleSetFunc(chargeControl, simpleValueTransform))
+	validateAndApply(*smt, inRange(0, 1), "-smt", simpleSetFunc(smtControl, smtValueTransform))
+	validateAndApply(*boost, inRange(0, 1), "-boost", simpleSetFunc(boostControl, simpleValueTransform))
+}
