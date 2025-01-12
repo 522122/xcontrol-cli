@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -15,10 +17,35 @@ const (
 	profileControl = "/sys/firmware/acpi/platform_profile"
 	chargeControl  = "/sys/class/power_supply/BAT0/charge_control_end_threshold"
 	smtControl     = "/sys/devices/system/cpu/smt/control"
+	smtActive      = "/sys/devices/system/cpu/smt/active"
 	boostControl   = "/sys/devices/system/cpu/cpufreq/boost"
 	physCores      = 8
 	unsetFlagValue = -1
 )
+
+type Json struct {
+	Cores  *string `json:"cores"`
+	Tdp    *string `json:"tdp"`
+	Charge *string `json:"charge"`
+	Smt    *string `json:"smt"`
+	Boost  *string `json:"boost"`
+}
+
+func readSysValue(control string) (string, error) {
+	file, err := os.Open(control)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	buf := make([]byte, 16)
+	n, err := file.Read(buf)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(string(buf[:n])), nil
+}
 
 func setSysValue(control, value string) error {
 	file, err := os.OpenFile(control, os.O_WRONLY, 0644)
@@ -73,6 +100,26 @@ func simpleSetFunc(control string, valueTransform func(int) string) func(int) er
 	}
 }
 
+func simpleReadFunc(control string) func() (string, error) {
+	return func() (string, error) {
+		return readSysValue(control)
+	}
+}
+
+func readCpuCount() (string, error) {
+	coresValue := 1
+
+	for i := 1; i < physCores; i++ {
+		if coreValue, err := readSysValue(fmt.Sprintf("%s/cpu%d/online", cpuControl, i)); err == nil {
+			if coreValue == "1" {
+				coresValue++
+			}
+		}
+	}
+
+	return strconv.Itoa(coresValue), nil
+}
+
 func setCpuCount(n int) error {
 	var tasks []func(int) error
 	var errList []error
@@ -90,12 +137,12 @@ func setCpuCount(n int) error {
 	// order is 1,9,2,10,3,11 ...
 	for i, task := range tasks {
 		if err := task(i); err != nil {
-			errList = append(errList, fmt.Errorf("Core %d: %v", i, err))
+			errList = append(errList, fmt.Errorf("core %d: %v", i, err))
 		}
 	}
 
 	if len(errList) > 0 {
-		return fmt.Errorf("Failed to set some CPU cores: %v", errList)
+		return fmt.Errorf("failed to set some CPU cores: %v", errList)
 	}
 	return nil
 }
@@ -146,13 +193,20 @@ func validateAndApply(n int, validate func(int) error, flagName string, setFunc 
 	}
 }
 
+func readAndAssign(k **string, readFn func() (string, error)) {
+	if value, err := readFn(); err == nil {
+		*k = &value
+	}
+}
+
 func main() {
 	var (
-		boost  = flag.Int("boost", unsetFlagValue, "Control CPU boost (0 | 1)")
-		charge = flag.Int("charge", unsetFlagValue, "Control max battery charge limit (50 - 100)")
-		cores  = flag.Int("cores", unsetFlagValue, "Control online CPU cores (1 - 8)")
-		smt    = flag.Int("smt", unsetFlagValue, "Control Simultaneous Multi-Threading (0 | 1)")
-		tdp    = flag.Int("tdp", unsetFlagValue, "Control TDP limit (8 - 25)")
+		boost    = flag.Int("boost", unsetFlagValue, "Control CPU boost (0 | 1)")
+		charge   = flag.Int("charge", unsetFlagValue, "Control max battery charge limit (50 - 100)")
+		cores    = flag.Int("cores", unsetFlagValue, "Control online CPU cores (1 - 8)")
+		smt      = flag.Int("smt", unsetFlagValue, "Control Simultaneous Multi-Threading (0 | 1)")
+		tdp      = flag.Int("tdp", unsetFlagValue, "Control TDP limit (8 - 25)")
+		jsonFlag = flag.Bool("json", false, "Output in JSON format")
 	)
 
 	flag.Parse()
@@ -161,6 +215,23 @@ func main() {
 		fmt.Println("Usage:")
 		flag.PrintDefaults()
 		os.Exit(1)
+	}
+
+	if *jsonFlag {
+
+		var jsonData Json
+
+		readAndAssign(&jsonData.Boost, simpleReadFunc(boostControl))
+		readAndAssign(&jsonData.Charge, simpleReadFunc(chargeControl))
+		readAndAssign(&jsonData.Smt, simpleReadFunc(smtActive))
+		readAndAssign(&jsonData.Tdp, simpleReadFunc(splControl))
+		readAndAssign(&jsonData.Cores, readCpuCount)
+
+		if jsonBytes, err := json.MarshalIndent(jsonData, "", " "); err == nil {
+			fmt.Println(string(jsonBytes))
+		}
+
+		os.Exit(0)
 	}
 
 	validateAndApply(*cores, inRange(1, physCores), "-cores", setCpuCount)
