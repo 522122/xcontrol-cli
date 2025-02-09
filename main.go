@@ -65,14 +65,6 @@ func simpleValueTransform(n int) string {
 	return strconv.Itoa(n)
 }
 
-// func smtValueTransform(n int) string {
-// 	if n == 1 {
-// 		return "on"
-// 	} else {
-// 		return "off"
-// 	}
-// }
-
 func tdpValueTransform(n int) string {
 	switch {
 	case n < 17:
@@ -98,7 +90,7 @@ func cpuValueVirtTransform(n int, smt string) func(int) string {
 	return func(i int) string {
 		physCore := cpuValueTransform(n)(i)
 
-		if smt == "off" {
+		if smt == "0" {
 			return "0"
 		} else {
 			return physCore
@@ -141,15 +133,15 @@ func readSMTstatus() (string, error) {
 		online2, err2 := readSysValue(control2)
 
 		if err1 != nil || err2 != nil {
-			return "off", fmt.Errorf("failed to read core online status, %v, %v", err1, err2)
+			return "0", fmt.Errorf("failed to read core online status, %v, %v", err1, err2)
 		}
 
 		if online1 != online2 && online1 == "1" {
-			return "off", nil
+			return "0", nil
 		}
 	}
 
-	return "on", nil
+	return "1", nil
 }
 
 func setCpuCount(n int) error {
