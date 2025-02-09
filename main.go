@@ -16,7 +16,7 @@ const (
 	spptControl    = "/sys/devices/platform/asus-nb-wmi/ppt_pl2_sppt"
 	profileControl = "/sys/firmware/acpi/platform_profile"
 	chargeControl  = "/sys/class/power_supply/BAT0/charge_control_end_threshold"
-	smtControl     = "/sys/devices/system/cpu/smt/control"
+	// smtControl     = "/sys/devices/system/cpu/smt/control"
 	smtActive      = "/sys/devices/system/cpu/smt/active"
 	boostControl   = "/sys/devices/system/cpu/cpufreq/boost"
 	physCores      = 8
@@ -65,13 +65,13 @@ func simpleValueTransform(n int) string {
 	return strconv.Itoa(n)
 }
 
-func smtValueTransform(n int) string {
-	if n == 1 {
-		return "on"
-	} else {
-		return "off"
-	}
-}
+// func smtValueTransform(n int) string {
+// 	if n == 1 {
+// 		return "on"
+// 	} else {
+// 		return "off"
+// 	}
+// }
 
 func tdpValueTransform(n int) string {
 	switch {
@@ -120,6 +120,26 @@ func readCpuCount() (string, error) {
 	return strconv.Itoa(coresValue), nil
 }
 
+func readSMTstatus() (string, error) {
+	for i := 0; i < physCores; i++ {
+		control1 := fmt.Sprintf("%s/cpu%d/online", cpuControl, i)
+		control2 := fmt.Sprintf("%s/cpu%d/online", cpuControl, i+physCores)
+
+		online1, err1 := simpleReadFunc(control1)()
+		online2, err2 := simpleReadFunc(control2)()
+
+		if err1 != nil || err2 != nil {
+			return "0", fmt.Errorf("failed to read core online status, %v, %v", err1, err2)
+		}
+
+		if online1 != online2 && online1 == "1" {
+			return "0", nil
+		}
+	}
+
+	return "1", nil
+}
+
 func setCpuCount(n int) error {
 	var tasks []func(int) error
 	var errList []error
@@ -138,6 +158,27 @@ func setCpuCount(n int) error {
 	for i, task := range tasks {
 		if err := task(i); err != nil {
 			errList = append(errList, fmt.Errorf("core %d: %v", i, err))
+		}
+	}
+
+	if len(errList) > 0 {
+		return fmt.Errorf("failed to set some CPU cores: %v", errList)
+	}
+	return nil
+}
+
+func setSmt(n int) error {
+	var tasks []func(int) error
+	var errList []error
+
+	for i := 0; i < physCores; i++ {
+		control2 := fmt.Sprintf("%s/cpu%d/online", cpuControl, i+physCores)
+		tasks = append(tasks, simpleSetFunc(control2, simpleValueTransform))
+	}
+
+	for i, task := range tasks {
+		if err := task(n); err != nil {
+			errList = append(errList, fmt.Errorf("SMT core %d: %v", i, err))
 		}
 	}
 
@@ -223,7 +264,7 @@ func main() {
 
 		readAndAssign(&jsonData.Boost, simpleReadFunc(boostControl))
 		readAndAssign(&jsonData.Charge, simpleReadFunc(chargeControl))
-		readAndAssign(&jsonData.Smt, simpleReadFunc(smtActive))
+		readAndAssign(&jsonData.Smt, readSMTstatus)
 		readAndAssign(&jsonData.Tdp, simpleReadFunc(splControl))
 		readAndAssign(&jsonData.Cores, readCpuCount)
 
@@ -237,6 +278,6 @@ func main() {
 	validateAndApply(*cores, inRange(1, physCores), "-cores", setCpuCount)
 	validateAndApply(*tdp, inRange(8, 25), "-tdp", setTdp)
 	validateAndApply(*charge, inRange(50, 100), "-charge", simpleSetFunc(chargeControl, simpleValueTransform))
-	validateAndApply(*smt, inRange(0, 1), "-smt", simpleSetFunc(smtControl, smtValueTransform))
+	validateAndApply(*smt, inRange(0, 1), "-smt", setSmt)
 	validateAndApply(*boost, inRange(0, 1), "-boost", simpleSetFunc(boostControl, simpleValueTransform))
 }
