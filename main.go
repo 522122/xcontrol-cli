@@ -94,6 +94,18 @@ func cpuValueTransform(n int) func(int) string {
 	}
 }
 
+func cpuValueVirtTransform(n int, smt string) func(int) string {
+	return func(i int) string {
+		physCore := cpuValueTransform(n)(i)
+
+		if smt == "off" {
+			return "0"
+		} else {
+			return physCore
+		}
+	}
+}
+
 func simpleSetFunc(control string, valueTransform func(int) string) func(int) error {
 	return func(n int) error {
 		return setSysValue(control, valueTransform(n))
@@ -121,39 +133,39 @@ func readCpuCount() (string, error) {
 }
 
 func readSMTstatus() (string, error) {
-	for i := 0; i < physCores; i++ {
+	for i := 1; i < physCores; i++ {
 		control1 := fmt.Sprintf("%s/cpu%d/online", cpuControl, i)
 		control2 := fmt.Sprintf("%s/cpu%d/online", cpuControl, i+physCores)
 
-		online1, err1 := simpleReadFunc(control1)()
-		online2, err2 := simpleReadFunc(control2)()
+		online1, err1 := readSysValue(control1)
+		online2, err2 := readSysValue(control2)
 
 		if err1 != nil || err2 != nil {
-			return "0", fmt.Errorf("failed to read core online status, %v, %v", err1, err2)
+			return "off", fmt.Errorf("failed to read core online status, %v, %v", err1, err2)
 		}
 
 		if online1 != online2 && online1 == "1" {
-			return "0", nil
+			return "off", nil
 		}
 	}
 
-	return "1", nil
+	return "on", nil
 }
 
 func setCpuCount(n int) error {
 	var tasks []func(int) error
 	var errList []error
+	smtStatus, _ := readSMTstatus()
 
 	for i := 1; i < physCores; i++ {
 		control1 := fmt.Sprintf("%s/cpu%d/online", cpuControl, i)
 		control2 := fmt.Sprintf("%s/cpu%d/online", cpuControl, i+physCores)
 		tasks = append(tasks,
 			simpleSetFunc(control1, cpuValueTransform(n)),
-			simpleSetFunc(control2, cpuValueTransform(n)),
+			simpleSetFunc(control2, cpuValueVirtTransform(n, smtStatus)),
 		)
 	}
 
-	// when smt is disabled some files are locked
 	// order is 1,9,2,10,3,11 ...
 	for i, task := range tasks {
 		if err := task(i); err != nil {
@@ -171,8 +183,21 @@ func setSmt(n int) error {
 	var tasks []func(int) error
 	var errList []error
 
+	setOffline := func(n int) string {
+		return "0"
+	}
+
 	for i := 0; i < physCores; i++ {
+		control1 := fmt.Sprintf("%s/cpu%d/online", cpuControl, i)
 		control2 := fmt.Sprintf("%s/cpu%d/online", cpuControl, i+physCores)
+
+		if i > 0 {
+			if isOnline, _ := readSysValue(control1); isOnline == "0" {
+				tasks = append(tasks, simpleSetFunc(control2, setOffline))
+				continue
+			}
+		}
+
 		tasks = append(tasks, simpleSetFunc(control2, simpleValueTransform))
 	}
 
@@ -244,7 +269,7 @@ func main() {
 	var (
 		boost    = flag.Int("boost", unsetFlagValue, "Control CPU boost (0 | 1)")
 		charge   = flag.Int("charge", unsetFlagValue, "Control max battery charge limit (50 - 100)")
-		cores    = flag.Int("cores", unsetFlagValue, "Control online CPU cores (1 - 8)")
+		cores    = flag.Int("cores", unsetFlagValue, "Control online CPU cores (2 - 8)")
 		smt      = flag.Int("smt", unsetFlagValue, "Control Simultaneous Multi-Threading (0 | 1)")
 		tdp      = flag.Int("tdp", unsetFlagValue, "Control TDP limit (8 - 25)")
 		jsonFlag = flag.Bool("json", false, "Output in JSON format")
@@ -275,7 +300,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	validateAndApply(*cores, inRange(1, physCores), "-cores", setCpuCount)
+	validateAndApply(*cores, inRange(2, physCores), "-cores", setCpuCount)
 	validateAndApply(*tdp, inRange(8, 25), "-tdp", setTdp)
 	validateAndApply(*charge, inRange(50, 100), "-charge", simpleSetFunc(chargeControl, simpleValueTransform))
 	validateAndApply(*smt, inRange(0, 1), "-smt", setSmt)
